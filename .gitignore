@@ -17,3 +17,6 @@ env/
 research_notes.md
 release/
 optimize.log
+qwen3-asr-0.6b-onnx-int4-merged/
+qwen3-asr-0.6b-onnx-int4/
+/.vscode

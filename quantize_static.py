@@ -63,6 +63,9 @@ def collect_calibration_data(
     """
     from src.mel import log_mel_spectrogram
     from src.prompt import EOS_TOKEN_IDS, build_prompt_ids, get_audio_pad_range
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
 
     providers = ["CPUExecutionProvider"]
     opts = ort.SessionOptions()
@@ -125,7 +128,7 @@ def collect_calibration_data(
             if audio_token_count == 0:
                 continue
 
-            prompt_ids = build_prompt_ids(audio_token_count)
+            prompt_ids = build_prompt_ids(audio_token_count, tokenizer=tokenizer)
             input_embeds = embed_tokens[prompt_ids].copy()
             audio_start, audio_end = get_audio_pad_range(prompt_ids)
             input_embeds[audio_start:audio_end] = audio_features[0]

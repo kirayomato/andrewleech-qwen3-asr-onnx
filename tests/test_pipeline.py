@@ -184,7 +184,7 @@ class TestPipeline:
         onnx_features = onnx_sessions["encoder"].run(["audio_features"], {"mel": mel_np})[0]
 
         audio_token_count = pt_features.shape[1]
-        prompt_ids = build_prompt_ids(audio_token_count)
+        prompt_ids = build_prompt_ids(audio_token_count, tokenizer=tokenizer)
 
         # Decode both
         pt_tokens = decode_pytorch(pytorch_model, pt_features, prompt_ids)
@@ -205,13 +205,13 @@ class TestPipeline:
             f"Token match rate {match_rate:.1%} below 95% threshold. PT: {pt_text!r}, ONNX: {onnx_text!r}"
         )
 
-    def test_greedy_deterministic(self, onnx_sessions, embed_tokens, mel):
+    def test_greedy_deterministic(self, onnx_sessions, embed_tokens, mel, tokenizer):
         """Running ONNX decode twice should produce identical output."""
         mel_np = mel.numpy()
         features = onnx_sessions["encoder"].run(["audio_features"], {"mel": mel_np})[0]
 
         audio_token_count = features.shape[1]
-        prompt_ids = build_prompt_ids(audio_token_count)
+        prompt_ids = build_prompt_ids(audio_token_count, tokenizer=tokenizer)
 
         tokens_1 = greedy_decode_onnx(onnx_sessions, embed_tokens, features, prompt_ids)
         tokens_2 = greedy_decode_onnx(onnx_sessions, embed_tokens, features, prompt_ids)

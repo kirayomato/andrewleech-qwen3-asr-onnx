@@ -29,16 +29,18 @@ from transformers import AutoTokenizer
 # ---------------------------------------------------------------------------
 
 
-def run_native(model, processor, audio: np.ndarray, sr: int = 16000) -> dict:
+def run_native(model, processor, audio: np.ndarray, sr: int = 16000, context: str | None = None, language: str | None = None) -> dict:
     """Run native qwen-asr inference (processor + model.generate)."""
     from src.prompt import EOS_TOKEN_IDS
 
     # Build the text prompt using the chat template
     messages = [
-        {"role": "system", "content": ""},
+        {"role": "system", "content": context or ""},
         {"role": "user", "content": [{"type": "audio", "audio": ""}]},
     ]
     text_prompt = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    if language is not None:
+        text_prompt += f"language {language}<asr_text>"
 
     inputs = processor(
         text=[text_prompt],
@@ -83,7 +85,9 @@ def run_native(model, processor, audio: np.ndarray, sr: int = 16000) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def run_wrapper_pytorch(model, audio: np.ndarray, tokenizer, device: str = "cpu") -> dict:
+def run_wrapper_pytorch(
+    model, audio: np.ndarray, tokenizer, device: str = "cpu", context: str | None = None, language: str | None = None
+) -> dict:
     """Run our PyTorch wrappers (EncoderWrapper + greedy_decode_pytorch)."""
     from src.encoder_wrapper import EncoderWrapper
     from src.mel import log_mel_spectrogram
@@ -99,7 +103,7 @@ def run_wrapper_pytorch(model, audio: np.ndarray, tokenizer, device: str = "cpu"
 
     # Build prompt and decode
     audio_token_count = audio_features.shape[1]
-    prompt_ids = build_prompt_ids(audio_token_count)
+    prompt_ids = build_prompt_ids(audio_token_count, language=language, context=context, tokenizer=tokenizer)
 
     from validate import greedy_decode_pytorch
 
@@ -141,7 +145,15 @@ def load_onnx_sessions(onnx_dir: str) -> dict:
     return sessions
 
 
-def run_onnx(sessions, embed_tokens, audio: np.ndarray, tokenizer, label: str) -> dict:
+def run_onnx(
+    sessions,
+    embed_tokens,
+    audio: np.ndarray,
+    tokenizer,
+    label: str,
+    context: str | None = None,
+    language: str | None = None,
+) -> dict:
     """Run full ONNX pipeline with split decoder (decoder_init + decoder_step)."""
     from src.inference import greedy_decode_onnx
     from src.mel import log_mel_spectrogram
@@ -158,7 +170,7 @@ def run_onnx(sessions, embed_tokens, audio: np.ndarray, tokenizer, label: str) -
 
     # Prompt + decode
     audio_token_count = audio_features.shape[1]
-    prompt_ids = build_prompt_ids(audio_token_count)
+    prompt_ids = build_prompt_ids(audio_token_count, language=language, context=context, tokenizer=tokenizer)
 
     t0 = time.time()
     tokens = greedy_decode_onnx(sessions, embed_tokens, audio_features, prompt_ids, max_tokens=256)
@@ -257,6 +269,8 @@ def main():
     parser.add_argument("--fp32-dir", default="output/qwen3-asr-0.6b")
     parser.add_argument("--int8-dir", default="output/qwen3-asr-0.6b-int8")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--context", default=None, help="Optional system-message context (hotwords)")
+    parser.add_argument("--language", default=None, help="Optional forced language, e.g. English")
     args = parser.parse_args()
 
     ground_truths = args.ground_truth or [None] * len(args.audio)
@@ -334,19 +348,25 @@ def main():
 
         # Path 1: Native
         print("\n  Running native inference...")
-        results["native"] = run_native(model, processor, audio, sr=16000)
+        results["native"] = run_native(model, processor, audio, sr=16000, context=args.context, language=args.language)
 
         # Path 2: Wrapper PyTorch
         print("  Running wrapper PyTorch...")
-        results["wrapper"] = run_wrapper_pytorch(model, audio, tokenizer, device=args.device)
+        results["wrapper"] = run_wrapper_pytorch(
+            model, audio, tokenizer, device=args.device, context=args.context, language=args.language
+        )
 
         # Path 3: FP32 ONNX
         print("  Running FP32 ONNX...")
-        results["fp32"] = run_onnx(fp32_sessions, fp32_embed, audio, tokenizer, "FP32")
+        results["fp32"] = run_onnx(
+            fp32_sessions, fp32_embed, audio, tokenizer, "FP32", context=args.context, language=args.language
+        )
 
         # Path 4: INT8 ONNX
         print("  Running INT8 ONNX...")
-        results["int8"] = run_onnx(int8_sessions, int8_embed, audio, tokenizer, "INT8")
+        results["int8"] = run_onnx(
+            int8_sessions, int8_embed, audio, tokenizer, "INT8", context=args.context, language=args.language
+        )
 
         # --- Report ---
         print("\n--- Transcriptions ---")

@@ -40,6 +40,7 @@ import onnx
 import soundfile as sf
 import torch
 from datasets import Audio, load_dataset
+from transformers import AutoTokenizer
 
 from export import (
     copy_tokenizer,
@@ -59,6 +60,7 @@ from validate import greedy_decode_pytorch, run_encoder_pytorch
 
 def collect_activations(
     model,
+    tokenizer,
     n_samples: int,
     device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
@@ -145,7 +147,7 @@ def collect_activations(
             if audio_token_count == 0:
                 continue
 
-            prompt_ids = build_prompt_ids(audio_token_count)
+            prompt_ids = build_prompt_ids(audio_token_count, tokenizer=tokenizer)
             # Hooks accumulate on every decoder forward call inside greedy_decode_pytorch
             greedy_decode_pytorch(
                 model,
@@ -267,6 +269,7 @@ def apply_smoothing(model, scales: dict[str, torch.Tensor]) -> None:
 def verify_equivalence(
     original_model,
     smoothed_model,
+    tokenizer,
     test_audio_path: str,
     device: str = "cpu",
 ) -> bool:
@@ -289,7 +292,7 @@ def verify_equivalence(
     mel = log_mel_spectrogram(audio, device=device)
     # Encoder not modified — run on original, reuse features for both
     audio_features = run_encoder_pytorch(original_model, mel)
-    prompt_ids = build_prompt_ids(audio_features.shape[1])
+    prompt_ids = build_prompt_ids(audio_features.shape[1], tokenizer=tokenizer)
 
     print("  Original model...")
     orig_tokens = greedy_decode_pytorch(original_model, audio_features, prompt_ids, device=device)
@@ -413,6 +416,7 @@ def main():
 
     # Load model
     model = load_model(args.model, device=args.device, dtype=torch.float32)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
     # Collect or load calibration activations
     if os.path.exists(acts_cache):
@@ -422,7 +426,7 @@ def main():
         print(f"  Loaded {len(activations)} activation vectors")
     else:
         t0 = time.time()
-        activations = collect_activations(model, n_samples=args.n_samples, device=args.device)
+        activations = collect_activations(model, tokenizer, n_samples=args.n_samples, device=args.device)
         print(f"  Collection done in {time.time() - t0:.1f}s")
         np.savez(acts_cache, **{k: v.numpy() for k, v in activations.items()})
         print(f"  Activations saved to {acts_cache}")
@@ -453,7 +457,7 @@ def main():
     # Verify equivalence
     if args.verify and model_orig is not None:
         print(f"\nVerifying equivalence on {args.verify_audio}...")
-        ok = verify_equivalence(model_orig, model, args.verify_audio, device=args.device)
+        ok = verify_equivalence(model_orig, model, tokenizer, args.verify_audio, device=args.device)
         if not ok:
             print("WARNING: Smoothed model produces different tokens — review implementation")
 

@@ -1,0 +1,8 @@
+# Minimal runtime for andrewleech Qwen3-ASR ONNX inference.
+# CUDA: replace onnxruntime with onnxruntime-gpu.
+# int4 MatMulNBits models need a recent ORT (accuracy_level=4).
+numpy
+onnxruntime>=1.20
+transformers>=4.48
+torch>=2.2
+scipy

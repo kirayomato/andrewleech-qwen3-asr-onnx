@@ -212,13 +212,15 @@ def validate_encoder(model, sessions, mel_np, mel_torch, device):
     return pt_features, onnx_features
 
 
-def validate_pipeline(model, sessions, embed_tokens, audio_features_pt, audio_features_onnx, tokenizer, device):
+def validate_pipeline(
+    model, sessions, embed_tokens, audio_features_pt, audio_features_onnx, tokenizer, device, context=None, language=None
+):
     """Compare full pipeline (encode -> decode) between PyTorch and ONNX."""
     print("\n=== Pipeline Validation ===")
 
     # Build prompt
     audio_token_count = audio_features_pt.shape[1]
-    prompt_ids = build_prompt_ids(audio_token_count)
+    prompt_ids = build_prompt_ids(audio_token_count, language=language, context=context, tokenizer=tokenizer)
     print(f"  Prompt length: {len(prompt_ids)} tokens ({audio_token_count} audio tokens)")
 
     # PyTorch decode
@@ -267,6 +269,8 @@ def main():
     parser.add_argument("--model", default="Qwen/Qwen3-ASR-0.6B", help="HuggingFace model ID")
     parser.add_argument("--device", default="cpu", help="Device for PyTorch model")
     parser.add_argument("--max-tokens", type=int, default=256, help="Max decode tokens")
+    parser.add_argument("--context", default=None, help="Optional system-message context (hotwords)")
+    parser.add_argument("--language", default=None, help="Optional forced language, e.g. English")
     args = parser.parse_args()
 
     # Load audio
@@ -318,6 +322,8 @@ def main():
             onnx_features,
             tokenizer,
             args.device,
+            context=args.context,
+            language=args.language,
         )
     else:
         print("\nSkipping pipeline validation (missing decoder ONNX files)")

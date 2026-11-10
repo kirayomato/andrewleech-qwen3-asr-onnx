@@ -245,7 +245,12 @@ class ModelResult:
 
 
 def evaluate(
-    model_dirs: list[tuple[str, str, str | None]], dataset_keys: list[str], n_samples: int, output_path: str | None
+    model_dirs: list[tuple[str, str, str | None]],
+    dataset_keys: list[str],
+    n_samples: int,
+    output_path: str | None,
+    context: str | None = None,
+    language: str | None = None,
 ):
     """
     Main evaluation loop.
@@ -295,7 +300,7 @@ def evaluate(
             for name, _model_dir, sessions, embed, tokenizer in models:
                 try:
                     t0 = time.time()
-                    hyp_raw = _run(sessions, embed, tokenizer, audio)
+                    hyp_raw = _run(sessions, embed, tokenizer, audio, context=context, language=language)
                     infer_times[name] += time.time() - t0
                     hyp_norm = normalize(hyp_raw)
                 except Exception as e:
@@ -351,7 +356,14 @@ def evaluate(
         print(f"\nResults written to {output_path}")
 
 
-def _run(sessions: dict, embed_tokens: np.ndarray, tokenizer, audio: np.ndarray) -> str:
+def _run(
+    sessions: dict,
+    embed_tokens: np.ndarray,
+    tokenizer,
+    audio: np.ndarray,
+    context: str | None = None,
+    language: str | None = None,
+) -> str:
     """Run full ONNX pipeline, return raw decoded text."""
     from src.inference import greedy_decode_onnx
     from src.mel import log_mel_spectrogram
@@ -366,7 +378,7 @@ def _run(sessions: dict, embed_tokens: np.ndarray, tokenizer, audio: np.ndarray)
     if audio_token_count == 0:
         return ""
 
-    prompt_ids = build_prompt_ids(audio_token_count)
+    prompt_ids = build_prompt_ids(audio_token_count, language=language, context=context, tokenizer=tokenizer)
     tokens = greedy_decode_onnx(sessions, embed_tokens, audio_features, prompt_ids, max_tokens=256)
 
     while tokens and tokens[-1] in EOS_TOKEN_IDS:
@@ -408,6 +420,8 @@ def main():
         default=None,
         help="Path to write JSON results (optional)",
     )
+    parser.add_argument("--context", default=None, help="Optional system-message context (hotwords)")
+    parser.add_argument("--language", default=None, help="Optional forced language, e.g. English")
     args = parser.parse_args()
 
     model_dirs = []
@@ -421,7 +435,7 @@ def main():
             parser.error(f"Model directory not found: {path}")
         model_dirs.append((name, path, quant))
 
-    evaluate(model_dirs, args.datasets, args.n_samples, args.output)
+    evaluate(model_dirs, args.datasets, args.n_samples, args.output, context=args.context, language=args.language)
 
 
 if __name__ == "__main__":
