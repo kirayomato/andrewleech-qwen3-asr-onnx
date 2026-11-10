@@ -10,9 +10,10 @@ Library API:
 CLI:
     python transcribe.py --wav a.wav [--wav b.wav ...]
 
-Expects the self-contained export layout (encoder.onnx, decoder_init.onnx,
-decoder_step.onnx, embed_tokens.bin, config.json, tokenizer.json) produced by
-export.py; quantized variants resolve via the .int4/.int8 filename suffix.
+Expects the self-contained export layout (encoder.onnx, embed_tokens.bin,
+config.json, tokenizer.json, plus either decoder_init/decoder_step or
+decoder_merged) produced by export.py; quantized variants resolve via the
+.int4/.int8 filename suffix.
 """
 
 import argparse
@@ -26,7 +27,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.inference import greedy_decode_onnx  # noqa: E402
+from src.inference import greedy_decode_merged, greedy_decode_onnx  # noqa: E402
 from src.mel import log_mel_spectrogram  # noqa: E402
 from src.prompt import EOS_TOKEN_IDS, build_prompt_ids  # noqa: E402
 
@@ -50,19 +51,28 @@ def _to_mono_f32(wav: np.ndarray) -> np.ndarray:
     return np.clip(wav, -1.0, 1.0)
 
 
-def _resolve_model_path(model_dir: str, name: str, quant: Optional[str]) -> str:
+def _find_model_path(model_dir: str, name: str, quant: Optional[str]) -> Optional[str]:
     if quant:
         path = os.path.join(model_dir, f"{name}.{quant}.onnx")
         if os.path.exists(path):
             return path
     path = os.path.join(model_dir, f"{name}.onnx")
-    if os.path.exists(path):
-        return path
-    raise FileNotFoundError(f"No ONNX file for {name} (quant={quant}) in {model_dir}")
+    return path if os.path.exists(path) else None
+
+
+def _resolve_model_path(model_dir: str, name: str, quant: Optional[str]) -> str:
+    path = _find_model_path(model_dir, name, quant)
+    if path is None:
+        raise FileNotFoundError(f"No ONNX file for {name} (quant={quant}) in {model_dir}")
+    return path
 
 
 class Transcriber:
-    """Loads the ONNX package once and transcribes 16 kHz mono waveforms."""
+    """Loads the ONNX package once and transcribes 16 kHz mono waveforms.
+
+    Both decoder layouts are supported: split (decoder_init + decoder_step) and
+    merged (decoder_merged), selected by the files present in onnx_dir.
+    """
 
     def __init__(
         self,
@@ -73,20 +83,24 @@ class Transcriber:
         language: Optional[str] = None,
     ) -> None:
         import onnxruntime as ort
-        from transformers import AutoTokenizer
+        from tokenizers import Tokenizer
 
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
-        self.sessions = {
-            name: ort.InferenceSession(
-                _resolve_model_path(onnx_dir, name, quant),
-                opts,
-                providers=["CPUExecutionProvider"],
-            )
-            for name in ("encoder", "decoder_init", "decoder_step")
-        }
+
+        def session(path: str):
+            return ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"])
+
+        self.sessions = {"encoder": session(_resolve_model_path(onnx_dir, "encoder", quant))}
+        merged = _find_model_path(onnx_dir, "decoder_merged", quant)
+        if merged is not None:
+            self.sessions["decoder_merged"] = session(merged)
+        else:
+            for name in ("decoder_init", "decoder_step"):
+                self.sessions[name] = session(_resolve_model_path(onnx_dir, name, quant))
+
         self.embed = self._load_embed(onnx_dir)
-        self.tokenizer = AutoTokenizer.from_pretrained(onnx_dir, trust_remote_code=True)
+        self.tokenizer = Tokenizer.from_file(os.path.join(onnx_dir, "tokenizer.json"))
         self.max_new_tokens = int(max_new_tokens)
         self.context = context
         self.language = language
@@ -119,9 +133,18 @@ class Transcriber:
             context=self.context,
             tokenizer=self.tokenizer,
         )
-        tokens = greedy_decode_onnx(
-            self.sessions, self.embed, audio_features, prompt_ids, max_tokens=self.max_new_tokens
-        )
+        if "decoder_merged" in self.sessions:
+            tokens = greedy_decode_merged(
+                self.sessions["decoder_merged"],
+                self.embed,
+                audio_features,
+                prompt_ids,
+                max_tokens=self.max_new_tokens,
+            )
+        else:
+            tokens = greedy_decode_onnx(
+                self.sessions, self.embed, audio_features, prompt_ids, max_tokens=self.max_new_tokens
+            )
         while tokens and tokens[-1] in EOS_TOKEN_IDS:
             tokens.pop()
         text = self.tokenizer.decode(tokens, skip_special_tokens=True)

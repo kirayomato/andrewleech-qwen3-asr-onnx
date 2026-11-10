@@ -1,8 +1,12 @@
 # Minimal runtime for andrewleech Qwen3-ASR ONNX inference.
 # CUDA: replace onnxruntime with onnxruntime-gpu.
 # int4 MatMulNBits models need a recent ORT (accuracy_level=4).
+# The tokenizer is read straight from the package's tokenizer.json, so no
+# transformers dependency — it also sidesteps the qwen3_asr config ambiguity
+# that get_text_config() raises on transformers 5.
 numpy
 onnxruntime>=1.20
-transformers>=4.48
+tokenizers>=0.15
 torch>=2.2
 scipy
+librosa

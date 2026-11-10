@@ -94,6 +94,19 @@ def build_prompt_ids(
     return ids
 
 
+def system_turn_len(prompt_ids: list[int]) -> int:
+    """Index where the system turn ends and the user turn begins.
+
+    The system turn is everything before the second <|im_start|>. Nothing in it
+    depends on the audio, which is what lets a merged decoder compute its KV
+    once and reuse it across utterances.
+    """
+    for i in range(1, len(prompt_ids)):
+        if prompt_ids[i] == IM_START_TOKEN_ID:
+            return i
+    raise ValueError("prompt has no user turn")
+
+
 def get_audio_pad_range(prompt_ids: list[int]) -> tuple[int, int]:
     """
     Find the start and end indices of <|audio_pad|> tokens in the prompt.

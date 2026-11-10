@@ -18,9 +18,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.inference import greedy_decode_onnx
+from src.inference import greedy_decode_merged, greedy_decode_onnx, merged_prefill
 from src.mel import log_mel_spectrogram
-from src.prompt import EOS_TOKEN_IDS, build_prompt_ids
+from src.prompt import EOS_TOKEN_IDS, build_prompt_ids, system_turn_len
 
 # Model output may start with "language {name}<asr_text>" (or the degraded
 # "<asr text>" variant); strip it so transcribe() returns plain text.
@@ -63,9 +63,15 @@ class BaseASRModel(ABC):
 class Qwen3ASRModel(BaseASRModel):
     """Qwen3-ASR ONNX implementation.
 
-    model_id is the exported package directory (encoder/decoder_init/decoder_step,
-    embed_tokens.bin, config.json, tokenizer.json). quant selects the quantized
-    variant, with fallback to the unsuffixed FP32 file per component.
+    model_id is the exported package directory (encoder, embed_tokens.bin,
+    config.json, tokenizer.json). quant selects the quantized variant, with
+    fallback to the unsuffixed FP32 file per component.
+
+    Two decoder layouts are supported, picked from the files present:
+
+    - split: decoder_init + decoder_step, re-prefilled on every utterance
+    - merged: decoder_merged, takes embeddings plus a KV cache, so the system
+      turn is decoded once per context and reused
     """
 
     def __init__(
@@ -83,16 +89,22 @@ class Qwen3ASRModel(BaseASRModel):
         self.language = language
         self._embed_tokens: Optional[np.ndarray] = None
         self._tokenizer = None
+        self._prefix_key: Optional[tuple] = None
+        self._prefix_kv: Optional[tuple] = None
 
-    def _resolve(self, name: str) -> str:
+    def _find(self, name: str) -> Optional[str]:
         if self.quant:
             path = os.path.join(self.model_id, f"{name}.{self.quant}.onnx")
             if os.path.exists(path):
                 return path
         path = os.path.join(self.model_id, f"{name}.onnx")
-        if os.path.exists(path):
-            return path
-        raise FileNotFoundError(f"No ONNX file for {name} (quant={self.quant}) in {self.model_id}")
+        return path if os.path.exists(path) else None
+
+    def _resolve(self, name: str) -> str:
+        path = self._find(name)
+        if path is None:
+            raise FileNotFoundError(f"No ONNX file for {name} (quant={self.quant}) in {self.model_id}")
+        return path
 
     def _load_embed(self) -> np.ndarray:
         with open(os.path.join(self.model_id, "config.json")) as f:
@@ -107,20 +119,26 @@ class Qwen3ASRModel(BaseASRModel):
 
     def load(self):
         import onnxruntime as ort
-        from transformers import AutoTokenizer
+        from tokenizers import Tokenizer
 
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
-        self.model = {
-            name: ort.InferenceSession(
-                self._resolve(name),
-                opts,
-                providers=["CPUExecutionProvider"],
-            )
-            for name in ("encoder", "decoder_init", "decoder_step")
-        }
+
+        def session(path: str):
+            return ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"])
+
+        self.model = {"encoder": session(self._resolve("encoder"))}
+        merged = self._find("decoder_merged")
+        if merged is not None:
+            self.model["decoder_merged"] = session(merged)
+        else:
+            for name in ("decoder_init", "decoder_step"):
+                self.model[name] = session(self._resolve(name))
+
         self._embed_tokens = self._load_embed()
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
+        self._tokenizer = Tokenizer.from_file(os.path.join(self.model_id, "tokenizer.json"))
+        self._prefix_key = None
+        self._prefix_kv = None
         return self
 
     def _transcribe_one(self, wav: np.ndarray) -> str:
@@ -135,17 +153,42 @@ class Qwen3ASRModel(BaseASRModel):
             context=self.context,
             tokenizer=self._tokenizer,
         )
-        tokens = greedy_decode_onnx(
-            self.model,
-            self._embed_tokens,
-            audio_features,
-            prompt_ids,
-            max_tokens=self.max_new_tokens,
-        )
+        if "decoder_merged" in self.model:
+            tokens = self._decode_merged(audio_features, prompt_ids)
+        else:
+            tokens = greedy_decode_onnx(
+                self.model,
+                self._embed_tokens,
+                audio_features,
+                prompt_ids,
+                max_tokens=self.max_new_tokens,
+            )
         while tokens and tokens[-1] in EOS_TOKEN_IDS:
             tokens.pop()
         text = self._tokenizer.decode(tokens, skip_special_tokens=True)
         return _LANG_PREFIX_RE.sub("", text).strip()
+
+    def _decode_merged(self, audio_features: np.ndarray, prompt_ids: List[int]) -> List[int]:
+        """Decode with the system turn's KV reused while the context is unchanged."""
+        n_system = system_turn_len(prompt_ids)
+        key = tuple(prompt_ids[:n_system])
+        if self._prefix_key != key or self._prefix_kv is None:
+            self._prefix_kv = merged_prefill(
+                self.model["decoder_merged"], self._embed_tokens, prompt_ids[:n_system]
+            )
+            self._prefix_key = key
+
+        prefix_keys, prefix_values = self._prefix_kv
+        return greedy_decode_merged(
+            self.model["decoder_merged"],
+            self._embed_tokens,
+            audio_features,
+            prompt_ids,
+            max_tokens=self.max_new_tokens,
+            past_keys=prefix_keys,
+            past_values=prefix_values,
+            n_past=n_system,
+        )
 
     def transcribe(self, audio_batch: List[np.ndarray]) -> List[str]:
         if isinstance(audio_batch, np.ndarray):
